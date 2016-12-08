@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io/ioutil"
 	"math/big"
 	"net"
 	"net/http"
@@ -117,92 +118,113 @@ func AddPort(address string, port int) string {
 	}
 }
 
-func SendUdp(address string, payload []byte, num int, timeout time.Duration, sleep time.Duration) {
-	sent := 0
-	for sent < num || num == 0 {
-		conn, err := net.DialTimeout("udp", address, timeout)
-		if err != nil {
-			continue
-		}
-		defer conn.Close()
-		for sent < num || num == 0 {
-			conn.Write(payload)
-			sent = sent + 1
-			if sleep > 0 {
-				time.Sleep(sleep)
+func SendUdp(addresses <-chan string, payload []byte, timeout time.Duration, sleep time.Duration, wg *sync.WaitGroup) {
+	defer wg.Done()
+	lastAddr := ""
+	var conn net.Conn
+	var err error
+	for address := range addresses {
+		if address != lastAddr {
+			lastAddr = address
+			if conn != nil {
+				conn.Close()
+			}
+			conn, err = net.DialTimeout("udp", address, timeout)
+			if err != nil {
+				continue
 			}
 		}
-	}
-}
-
-func SendTcp(address string, payload []byte, num int, timeout time.Duration, sleep time.Duration) {
-	sent := 0
-	for sent < num || num == 0 {
-		conn, err := net.DialTimeout("tcp", address, timeout)
-		sent = sent + 1
-		if err != nil {
-			continue
-		}
-		defer conn.Close()
-		for sent < num || num == 0 {
-			conn.Write(payload)
-			sent = sent + 1
-			if sleep > 0 {
-				time.Sleep(sleep)
-			}
-		}
-	}
-}
-
-func SendHttp(url string, payload []byte, num int, timeout time.Duration, sleep time.Duration) {
-    // TODO: Investigate keep alives
-	sent := 0
-    method := "POST"
-	client := http.Client{Timeout: timeout}
-	for sent < num || num == 0 {
-        req, err := http.NewRequest(method, url, bytes.NewBuffer(payload))
-        if err != nil {
-            fmt.Println(err)
-            break
-        }
-        resp, err := client.Do(req)
-        if err != nil {
-            fmt.Println(err)
-            break
-        }
-        resp.Body.Close()
-
-		sent = sent + 1
+		conn.Write(payload)
 		if sleep > 0 {
 			time.Sleep(sleep)
 		}
 	}
 }
 
-func Spray(proto string, payload []byte, port int, iprange <-chan string, path string, timeout time.Duration, sleep time.Duration, num int, wg *sync.WaitGroup) {
+func SendTcp(addresses <-chan string, payload []byte, timeout time.Duration, sleep time.Duration, wg *sync.WaitGroup) {
 	defer wg.Done()
+	lastAddr := ""
+	var conn net.Conn
+	for address := range addresses {
+		if address != lastAddr {
+			if conn != nil {
+				conn.Close()
+			}
+			conn, _ = net.DialTimeout("tcp", address, timeout)
+			continue
+		}
+		conn.Write(payload)
+		if sleep > 0 {
+			time.Sleep(sleep)
+		}
+	}
+	if conn != nil {
+		conn.Close()
+	}
+}
+
+func SendHttp(urls <-chan string, payload []byte, timeout time.Duration, sleep time.Duration, wg *sync.WaitGroup) {
+	// TODO: Investigate keep alives
+	// client.Transport = &http.Transport{DisableKeepAlives: true}
+	defer wg.Done()
+	method := "POST"
+	client := http.Client{Timeout: timeout}
+	for url := range urls {
+		req, err := http.NewRequest(method, url, bytes.NewBuffer(payload))
+		if err != nil {
+			fmt.Println(err)
+			break
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			fmt.Println(err)
+			break
+		}
+		ioutil.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		if sleep > 0 {
+			time.Sleep(sleep)
+		}
+	}
+}
+
+func Spray(iprange <-chan string, proto string, port int, path string, payload []byte, num int, count int, timeout time.Duration, sleep time.Duration, wg *sync.WaitGroup) {
+	defer wg.Done()
+	queue := make(chan string)
+	children := &sync.WaitGroup{}
+	children.Add(count)
+	for i := 0; i < count; i++ {
+		if proto == "http" {
+			go SendHttp(queue, payload, timeout, sleep, children)
+		} else if proto == "tcp" {
+			go SendTcp(queue, payload, timeout, sleep, children)
+		} else {
+			go SendUdp(queue, payload, timeout, sleep, children)
+		}
+	}
 	for address := range iprange {
 		withPort := AddPort(address, port)
 		if proto == "http" {
-			httpAddr := fmt.Sprintf("http://%s%s", withPort, path)
-			SendHttp(httpAddr, payload, num, timeout, sleep)
-		} else if proto == "tcp" {
-			SendTcp(withPort, payload, num, timeout, sleep)
-		} else {
-			SendUdp(withPort, payload, num, timeout, sleep)
+			withPort = fmt.Sprintf("http://%s%s", withPort, path)
+		}
+		for sent := 0; num <= 0 || sent < num; sent++ {
+			queue <- withPort
 		}
 	}
+	close(queue)
+	children.Wait()
 }
 
 func main() {
 	proto := flag.String("proto", "tcp", "one of udp, tcp or http")
 	port := flag.Int("port", 80, "remote port")
 	size := flag.Int("size", 100, "size of payload in bytes")
-	num := flag.Int("num", 1, "number of messages to send per ip, 0 for unlimited")
+	num := flag.Int("num", 0, "number of messages to send per ip, 0 for unlimited")
 	sleep := flag.Int("sleep", 0, "time in milliseconds to wait between consecutive messages")
 	timeout := flag.Int("timeout", 10, "timeout in milliseconds per message")
 	parallel := flag.Int("parallel", 1, "number of addresses to try in parallel")
-    // perAddress := flag.Int("perHttp", 1, "number of parallel requests per address")
+	count := flag.Int("count", 1, "number of messages to send in parallel to each address")
 	path := flag.String("path", "/", "path to use for http requests")
 	flag.Parse()
 
@@ -233,7 +255,7 @@ func main() {
 	wg := &sync.WaitGroup{}
 	wg.Add(*parallel)
 	for i := 0; i < *parallel; i++ {
-		go Spray(*proto, payload, *port, addresses, *path, time.Duration(*timeout)*time.Millisecond, time.Duration(*sleep)*time.Millisecond, *num, wg)
+		go Spray(addresses, *proto, *port, *path, payload, *num, *count, time.Duration(*timeout)*time.Millisecond, time.Duration(*sleep)*time.Millisecond, wg)
 	}
 	wg.Wait()
 }
