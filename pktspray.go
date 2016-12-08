@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"flag"
 	"fmt"
 	"math/big"
 	"net"
+	"net/http"
 	"os"
 	"strings"
 	"sync"
@@ -115,36 +117,93 @@ func AddPort(address string, port int) string {
 	}
 }
 
-func Spray(proto string, payload string, port int, iprange <-chan string, timeout int, num int, wg *sync.WaitGroup) {
-	defer wg.Done()
-	for address := range iprange {
-		tries := num
-		for tries > 0 {
-			conn, err := net.DialTimeout(proto, AddPort(address, port), time.Duration(timeout)*time.Millisecond)
-			if proto == "tcp" {
-				// for tcp, dialing requires sending a packet (actually two packets)
-				tries = tries - 1
-			}
-			if err != nil {
-				continue
-			} else {
-				defer conn.Close()
-				for tries > 0 {
-					fmt.Fprint(conn, payload)
-					tries = tries - 1
-				}
+func SendUdp(address string, payload []byte, num int, timeout time.Duration, sleep time.Duration) {
+	sent := 0
+	for sent < num || num == 0 {
+		conn, err := net.DialTimeout("udp", address, timeout)
+		if err != nil {
+			continue
+		}
+		defer conn.Close()
+		for sent < num || num == 0 {
+			conn.Write(payload)
+			sent = sent + 1
+			if sleep > 0 {
+				time.Sleep(sleep)
 			}
 		}
 	}
 }
 
+func SendTcp(address string, payload []byte, num int, timeout time.Duration, sleep time.Duration) {
+	sent := 0
+	for sent < num || num == 0 {
+		conn, err := net.DialTimeout("tcp", address, timeout)
+		sent = sent + 1
+		if err != nil {
+			continue
+		}
+		defer conn.Close()
+		for sent < num || num == 0 {
+			conn.Write(payload)
+			sent = sent + 1
+			if sleep > 0 {
+				time.Sleep(sleep)
+			}
+		}
+	}
+}
+
+func SendHttp(url string, payload []byte, num int, timeout time.Duration, sleep time.Duration) {
+    // TODO: Investigate keep alives
+	sent := 0
+    method := "POST"
+	client := http.Client{Timeout: timeout}
+	for sent < num || num == 0 {
+        req, err := http.NewRequest(method, url, bytes.NewBuffer(payload))
+        if err != nil {
+            fmt.Println(err)
+            break
+        }
+        resp, err := client.Do(req)
+        if err != nil {
+            fmt.Println(err)
+            break
+        }
+        resp.Body.Close()
+
+		sent = sent + 1
+		if sleep > 0 {
+			time.Sleep(sleep)
+		}
+	}
+}
+
+func Spray(proto string, payload []byte, port int, iprange <-chan string, path string, timeout time.Duration, sleep time.Duration, num int, wg *sync.WaitGroup) {
+	defer wg.Done()
+	for address := range iprange {
+		withPort := AddPort(address, port)
+		if proto == "http" {
+			httpAddr := fmt.Sprintf("http://%s%s", withPort, path)
+			SendHttp(httpAddr, payload, num, timeout, sleep)
+		} else if proto == "tcp" {
+			SendTcp(withPort, payload, num, timeout, sleep)
+		} else {
+			SendUdp(withPort, payload, num, timeout, sleep)
+		}
+	}
+}
+
 func main() {
-	proto := flag.String("proto", "tcp", "protocol (udp or tcp)")
+	proto := flag.String("proto", "tcp", "one of udp, tcp or http")
 	port := flag.Int("port", 80, "remote port")
 	size := flag.Int("size", 100, "size of payload in bytes")
-	num := flag.Int("num", 1, "number of packets to send per ip")
-	timeout := flag.Int("timeout", 10, "timeout in milliseconds per tcp connection")
-	parallel := flag.Int("parallel", 1, "number of connections to open in parallel")
+	num := flag.Int("num", 1, "number of messages to send per ip, 0 for unlimited")
+	sleep := flag.Int("sleep", 0, "time in milliseconds to wait between consecutive messages")
+	timeout := flag.Int("timeout", 10, "timeout in milliseconds per message")
+	parallel := flag.Int("parallel", 1, "number of addresses to try in parallel")
+    // perAddress := flag.Int("perHttp", 1, "number of parallel requests per address")
+	path := flag.String("path", "/", "path to use for http requests")
 	flag.Parse()
 
 	if flag.NArg() != 1 {
@@ -155,7 +214,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	if *proto != "tcp" && *proto != "udp" {
+	if *proto != "tcp" && *proto != "udp" && *proto != "http" {
 		fmt.Println("unsuported protocol", *proto)
 		os.Exit(1)
 	}
@@ -168,13 +227,13 @@ func main() {
 	prefix := ipnet.IP
 	cidr, _ := ipnet.Mask.Size()
 
-	payload := strings.Repeat("lorem ipsum ", 1+(*size)/12)[:*size]
+	payload := []byte(strings.Repeat("0123456789", 1+(*size)/10)[:*size])
 
 	addresses := IPRange(prefix, cidr)
 	wg := &sync.WaitGroup{}
 	wg.Add(*parallel)
 	for i := 0; i < *parallel; i++ {
-		go Spray(*proto, payload, *port, addresses, *timeout, *num, wg)
+		go Spray(*proto, payload, *port, addresses, *path, time.Duration(*timeout)*time.Millisecond, time.Duration(*sleep)*time.Millisecond, *num, wg)
 	}
 	wg.Wait()
 }
