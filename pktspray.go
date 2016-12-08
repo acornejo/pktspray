@@ -219,12 +219,12 @@ func Spray(iprange <-chan string, proto string, port int, path string, payload [
 func main() {
 	proto := flag.String("proto", "tcp", "one of udp, tcp or http")
 	port := flag.Int("port", 80, "remote port")
-	size := flag.Int("size", 100, "size of payload in bytes")
-	num := flag.Int("num", 0, "number of messages to send per ip, 0 for unlimited")
-	sleep := flag.Int("sleep", 0, "time in milliseconds to wait between consecutive messages")
-	timeout := flag.Int("timeout", 10, "timeout in milliseconds per message")
-	parallel := flag.Int("parallel", 1, "number of addresses to try in parallel")
-	count := flag.Int("count", 1, "number of messages to send in parallel to each address")
+	size := flag.Int("size", 100, "size of message payload in bytes")
+	num := flag.Int("num", 0, "number of messages to send to each address (default unlimited)")
+	sleep := flag.Int("sleep", 0, "time in milliseconds to wait between consecutive messages (default none)")
+	timeout := flag.Int("timeout", 100, "timeout in milliseconds per message")
+	spray := flag.Int("spray", 1, "number of addresses to connect to in parallel")
+	count := flag.Int("count", 1, "number of messages to send to an address in parallel")
 	path := flag.String("path", "/", "path to use for http requests")
 	flag.Parse()
 
@@ -253,8 +253,8 @@ func main() {
 
 	addresses := IPRange(prefix, cidr)
 	wg := &sync.WaitGroup{}
-	wg.Add(*parallel)
-	for i := 0; i < *parallel; i++ {
+	wg.Add(*spray)
+	for i := 0; i < *spray; i++ {
 		go Spray(addresses, *proto, *port, *path, payload, *num, *count, time.Duration(*timeout)*time.Millisecond, time.Duration(*sleep)*time.Millisecond, wg)
 	}
 	wg.Wait()

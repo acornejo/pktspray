@@ -15,16 +15,22 @@ packets sent per second you can use multiple connections in parallel.
 
         i.e.: pktspray 192.168.0.1/24
 
-    options:
-    -num int
-            number of packets to send per ip (default 1)
-    -parallel int
-            number of connections to open in parallel (default 1)
-    -port int
+     options:
+      -count int
+            number of messages to send to an address in parallel (default 1)
+      -num int
+            number of messages to send to each address (default unlimited)
+      -path string
+            path to use for http requests (default "/")
+      -port int
             remote port (default 80)
-    -proto string
-            protocol (udp or tcp) (default "tcp")
-    -size int
-            size of payload in bytes (default 100)
-    -timeout int
-            timeout in milliseconds for connection (default 1000)
+      -proto string
+            one of udp, tcp or http (default "tcp")
+      -size int
+            size of message payload in bytes (default 100)
+      -sleep int
+            time in milliseconds to wait between consecutive messages (default none)
+      -spray int
+            number of addresses to connect to in parallel (default 1)
+      -timeout int
+            timeout in milliseconds per message (default 100)
