@@ -143,6 +143,7 @@ type SprayOptions struct {
 // Interface to send a single packet on each call
 type PacketSender interface {
 	Send(ip net.IP, port int, options *SprayOptions)
+	Close()
 }
 
 type UdpSender struct {
@@ -180,6 +181,12 @@ func (s UdpSender) Send(ip net.IP, port int, options *SprayOptions) {
 	s.conn.Write(options.Payload)
 }
 
+func (s UdpSender) Close() {
+	if s.conn != nil {
+		s.conn.Close()
+	}
+}
+
 func (s TcpSender) Send(ip net.IP, port int, options *SprayOptions) {
 	var err error
 	address := IpPort(ip, port)
@@ -196,6 +203,12 @@ func (s TcpSender) Send(ip net.IP, port int, options *SprayOptions) {
 		return
 	}
 	s.conn.Write(options.Payload)
+}
+
+func (s TcpSender) Close() {
+	if s.conn != nil {
+		s.conn.Close()
+	}
 }
 
 func (s HttpSender) Send(ip net.IP, port int, options *SprayOptions) {
@@ -232,12 +245,19 @@ func (s HttpSender) Send(ip net.IP, port int, options *SprayOptions) {
 	}
 }
 
+func (s HttpSender) Close() {}
+
 func (s PrintSender) Send(ip net.IP, port int, options *SprayOptions) {
 	fmt.Println("spraying", IpPort(ip, port))
 }
 
+func (s PrintSender) Close() {
+	fmt.Println("closing")
+}
+
 func Spray(sender PacketSender, options *SprayOptions, wg *sync.WaitGroup) {
 	defer wg.Done()
+	defer sender.Close()
 	for ip := range options.Ips {
 		port := <-options.Ports
 		sender.Send(ip, port, options)
