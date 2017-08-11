@@ -2,230 +2,260 @@ package main
 
 import (
 	"bytes"
-	"errors"
 	"flag"
 	"fmt"
 	"io/ioutil"
 	"math/big"
+	"math/rand"
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
 
-type IPFamily struct {
-	AddressFormat string
-	PortFormat    string
-	Bits          int
+const MaxPort = (1 << 16) - 1
+
+func ParsePortRange(portRange string) (int, int, error) {
+	portComponents := strings.Split(portRange, "-")
+	if len(portComponents) == 1 {
+		if portRange == "++" {
+			return 0, MaxPort, nil
+		} else if strings.HasSuffix(portRange, "+") {
+			portStr := strings.TrimSuffix(portRange, "+")
+			port, err := strconv.Atoi(portStr)
+			if err != nil {
+				return 0, 0, fmt.Errorf("port %s not integer", portStr)
+			}
+			return port, MaxPort, nil
+		} else {
+			port, err := strconv.Atoi(portRange)
+			if err != nil {
+				return 0, 0, fmt.Errorf("port %s not integer", portRange)
+			}
+			return port, port, nil
+		}
+	} else if len(portComponents) == 2 {
+		portOne, err := strconv.Atoi(portComponents[0])
+		if err != nil {
+			return 0, 0, fmt.Errorf("port %s not integer", portComponents[0])
+		}
+		portTwo, err := strconv.Atoi(portComponents[1])
+		if err != nil {
+			return 0, 0, fmt.Errorf("port %s not integer", portComponents[1])
+		}
+		return portOne, portTwo, nil
+	} else {
+		return 0, 0, fmt.Errorf("%s is not a valid range", portRange)
+	}
 }
 
-var IPV4 = &IPFamily{"%d.%d.%d.%d", "%s:%d", 32}
-var IPV6 = &IPFamily{"%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x", "[%s]:%d", 128}
+func Address(prefix net.IP, cidr int, index *big.Int) net.IP {
+	prefixLength := len(prefix)
+	maxBits := prefixLength * 8
+	bitsLeft := maxBits - cidr
 
-func Address(format string, maxBits int, prefix []byte, cidr int, index *big.Int) (string, error) {
-	if len(prefix)*8 != maxBits {
-		return "", errors.New(fmt.Sprint("parsed ", len(prefix), " octets, expected ", maxBits, " bits"))
-	}
-
-	if cidr > maxBits {
-		return "", errors.New(fmt.Sprint("cidr exceeds ", maxBits, " bits"))
-	}
-
-	ip := make([]byte, len(prefix))
+	ip := make([]byte, prefixLength)
 	copy(ip, prefix)
 
-	if cidr < maxBits {
-		bitsLeft := maxBits - cidr
-		maxNum := big.NewInt(2)
-		maxNum.Exp(maxNum, big.NewInt(int64(bitsLeft)), nil)
-		maxNum.Sub(maxNum, big.NewInt(2))
-		if index.Cmp(maxNum) >= 0 {
-			return "", errors.New(fmt.Sprint("cidr ", cidr, " can only generate up to ", maxNum, " addresses"))
+	x := big.NewInt(1)
+	x.Add(x, index)
+	suffix := x.Bytes()
+	for i, j := len(ip)-1, len(suffix)-1; i >= 0 && j >= 0 && bitsLeft > 0; i, j, bitsLeft = i-1, j-1, bitsLeft-8 {
+		mask := byte(0xFF)
+		if bitsLeft < 8 {
+			mask = 1<<uint(bitsLeft) - 1
 		}
-		x := big.NewInt(1)
-		x.Add(x, index)
-		suffix := x.Bytes()
-		for i, j := len(ip)-1, len(suffix)-1; i >= 0 && j >= 0 && bitsLeft > 0; i, j, bitsLeft = i-1, j-1, bitsLeft-8 {
-			mask := byte(0xFF)
-			if bitsLeft < 8 {
-				mask = 1<<uint(bitsLeft) - 1
-			}
-			ip[i] |= suffix[j] & mask
-		}
+		ip[i] |= suffix[j] & mask
 	}
 
-	var printArgs []interface{} = make([]interface{}, len(ip))
-	for i, d := range ip {
-		printArgs[i] = d
-	}
-	return fmt.Sprintf(format, printArgs...), nil
+	return ip
 }
 
-func IPAddress(prefix []byte, cidr int, index *big.Int) (string, error) {
-	l := len(prefix)
-	if l == 4 {
-		return Address(IPV4.AddressFormat, IPV4.Bits, prefix, cidr, index)
-	} else if l == 16 {
-		return Address(IPV6.AddressFormat, IPV6.Bits, prefix, cidr, index)
-	} else {
-		return "", errors.New(fmt.Sprint("invalid prefix length", l))
-	}
-}
-
-func IPRange(prefix []byte, cidr int) <-chan string {
-	out := make(chan string)
+func IPRange(prefix net.IP, cidr int) <-chan net.IP {
+	out := make(chan net.IP)
+	bits := len(prefix)*8 - cidr
 	go func() {
 		defer close(out)
 
-		bits := len(prefix)*8 - cidr
+		for {
+			if bits <= 1 {
+				out <- prefix
+			} else {
+				i := big.NewInt(0)
+				incr := big.NewInt(1)
+				limit := big.NewInt(2)
+				limit.Exp(limit, big.NewInt(int64(bits)), nil)
+				limit.Sub(limit, big.NewInt(2))
 
-		i := big.NewInt(0)
-		incr := big.NewInt(1)
-
-		if bits <= 1 {
-			address, err := IPAddress(prefix, cidr, incr)
-			if err != nil {
-				panic(err)
+				for limit.Cmp(i) > 0 {
+					out <- Address(prefix, cidr, i)
+					i = i.Add(i, incr)
+				}
 			}
-			out <- address
-		}
-
-		limit := big.NewInt(2)
-		limit.Exp(limit, big.NewInt(int64(bits)), nil)
-		limit.Sub(limit, big.NewInt(2))
-
-		for limit.Cmp(i) > 0 {
-			address, err := IPAddress(prefix, cidr, i)
-			if err != nil {
-				panic(err)
-			}
-			out <- address
-
-			i = i.Add(i, incr)
 		}
 	}()
 	return out
 }
 
-func AddPort(address string, port int) string {
-	isIPV4 := strings.Count(address, ".") == 3
-	if isIPV4 {
-		return fmt.Sprintf(IPV4.PortFormat, address, port)
-	} else {
-		return fmt.Sprintf(IPV6.PortFormat, address, port)
-	}
+func PortRange(start int, stop int, step int) <-chan int {
+	out := make(chan int)
+	dist := stop - start
+	go func() {
+		defer close(out)
+
+		next := start
+		for {
+			out <- next
+			if dist > 0 {
+				if step == 0 {
+					next = start + rand.Intn(dist)
+				} else {
+					next = next + step
+					if next > stop {
+						next = start
+					} else if next < start {
+						next = stop
+					}
+				}
+			}
+		}
+	}()
+	return out
 }
 
-func SendUdp(addresses <-chan string, payload []byte, timeout time.Duration, sleep time.Duration, wg *sync.WaitGroup) {
-	defer wg.Done()
-	lastAddr := ""
-	var conn net.Conn
+func IpPort(ip net.IP, port int) string {
+	return net.JoinHostPort(ip.String(), fmt.Sprintf("%d", port))
+}
+
+type SprayOptions struct {
+	Ips        <-chan net.IP
+	Ports      <-chan int
+	Payload    []byte
+	Timeout    time.Duration
+	Sleep      time.Duration
+	HttpMethod string
+	HttpPath   string
+}
+
+// Interface to send a single packet on each call
+type PacketSender interface {
+	Send(ip net.IP, port int, options *SprayOptions)
+}
+
+type UdpSender struct {
+	lastAddr string
+	conn     net.Conn
+}
+
+type TcpSender struct {
+	lastAddr string
+	conn     net.Conn
+}
+
+type HttpSender struct {
+	lastAddr string
+	client   *http.Client
+	req      *http.Request
+}
+
+type PrintSender struct {
+}
+
+func (s UdpSender) Send(ip net.IP, port int, options *SprayOptions) {
 	var err error
-	for address := range addresses {
-		if address != lastAddr {
-			lastAddr = address
-			if conn != nil {
-				conn.Close()
-			}
-			conn, err = net.DialTimeout("udp", address, timeout)
-			if err != nil {
-				continue
-			}
+	address := IpPort(ip, port)
+	if address != s.lastAddr {
+		if s.conn != nil {
+			s.conn.Close()
 		}
-		conn.Write(payload)
-		if sleep > 0 {
-			time.Sleep(sleep)
+		s.conn, err = net.DialTimeout("udp", address, options.Timeout)
+		if err != nil {
+			return
 		}
+		s.lastAddr = address
 	}
+	s.conn.Write(options.Payload)
 }
 
-func SendTcp(addresses <-chan string, payload []byte, timeout time.Duration, sleep time.Duration, wg *sync.WaitGroup) {
-	defer wg.Done()
-	lastAddr := ""
-	var conn net.Conn
-	for address := range addresses {
-		if address != lastAddr {
-			if conn != nil {
-				conn.Close()
-			}
-			conn, _ = net.DialTimeout("tcp", address, timeout)
-			continue
+func (s TcpSender) Send(ip net.IP, port int, options *SprayOptions) {
+	var err error
+	address := IpPort(ip, port)
+	if address != s.lastAddr {
+		if s.conn != nil {
+			s.conn.Close()
 		}
-		conn.Write(payload)
-		if sleep > 0 {
-			time.Sleep(sleep)
+		s.conn, err = net.DialTimeout("tcp", address, options.Timeout)
+		if err != nil {
+			return
 		}
+		s.lastAddr = address
+		// we return here, since tcp SYN counts as a packet.
+		return
 	}
-	if conn != nil {
-		conn.Close()
-	}
+	s.conn.Write(options.Payload)
 }
 
-func SendHttp(urls <-chan string, payload []byte, timeout time.Duration, sleep time.Duration, wg *sync.WaitGroup) {
+func (s HttpSender) Send(ip net.IP, port int, options *SprayOptions) {
 	// TODO: Investigate keep alives
 	// client.Transport = &http.Transport{DisableKeepAlives: true}
-	defer wg.Done()
-	method := "POST"
-	client := http.Client{Timeout: timeout}
-	for url := range urls {
-		req, err := http.NewRequest(method, url, bytes.NewBuffer(payload))
+	if s.client == nil {
+		s.client = &http.Client{Timeout: options.Timeout}
+	}
+	if s.req == nil {
+		var err error
+		url := fmt.Sprintf("http://host:88%s", options.HttpPath)
+		s.req, err = http.NewRequest(options.HttpMethod, url, bytes.NewBuffer(options.Payload))
 		if err != nil {
-			fmt.Println(err)
-			break
+			panic(err)
 		}
-		resp, err := client.Do(req)
-		if err != nil {
-			fmt.Println(err)
-			break
-		}
-		ioutil.ReadAll(resp.Body)
-		resp.Body.Close()
+	}
 
-		if sleep > 0 {
-			time.Sleep(sleep)
-		}
+	address := IpPort(ip, port)
+	if address != s.lastAddr {
+		s.req.Host = address
+		s.req.URL.Host = s.req.Host
+		s.lastAddr = address
+	}
+	resp, err := s.client.Do(s.req)
+	if err != nil {
+		return
+	}
+
+	ioutil.ReadAll(resp.Body)
+	resp.Body.Close()
+	s.req.Body, err = s.req.GetBody()
+	if err != nil {
+		panic(err)
 	}
 }
 
-func Spray(iprange <-chan string, proto string, port int, path string, payload []byte, num int, count int, timeout time.Duration, sleep time.Duration, wg *sync.WaitGroup) {
+func (s PrintSender) Send(ip net.IP, port int, options *SprayOptions) {
+	fmt.Println("spraying", IpPort(ip, port))
+}
+
+func Spray(sender PacketSender, options *SprayOptions, wg *sync.WaitGroup) {
 	defer wg.Done()
-	queue := make(chan string)
-	children := &sync.WaitGroup{}
-	children.Add(count)
-	for i := 0; i < count; i++ {
-		if proto == "http" {
-			go SendHttp(queue, payload, timeout, sleep, children)
-		} else if proto == "tcp" {
-			go SendTcp(queue, payload, timeout, sleep, children)
-		} else {
-			go SendUdp(queue, payload, timeout, sleep, children)
+	for ip := range options.Ips {
+		port := <-options.Ports
+		sender.Send(ip, port, options)
+		if options.Sleep > 0 {
+			time.Sleep(options.Sleep)
 		}
 	}
-	for address := range iprange {
-		withPort := AddPort(address, port)
-		if proto == "http" {
-			withPort = fmt.Sprintf("http://%s%s", withPort, path)
-		}
-		for sent := 0; num <= 0 || sent < num; sent++ {
-			queue <- withPort
-		}
-	}
-	close(queue)
-	children.Wait()
 }
 
 func main() {
+	spray := flag.Int("spray", 1, "number of parallel connections")
 	proto := flag.String("proto", "tcp", "one of udp, tcp or http")
-	port := flag.Int("port", 80, "remote port")
+	port := flag.String("port", "80", "remote port [PORT] or range [MIN-MAX]")
 	size := flag.Int("size", 100, "size of message payload in bytes")
-	num := flag.Int("num", 0, "number of messages to send to each address (default unlimited)")
-	sleep := flag.Int("sleep", 0, "time in milliseconds to wait between consecutive messages (default none)")
-	timeout := flag.Int("timeout", 100, "timeout in milliseconds per message")
-	spray := flag.Int("spray", 1, "number of addresses to connect to in parallel")
-	count := flag.Int("count", 1, "number of messages to send to an address in parallel")
-	path := flag.String("path", "/", "path to use for http requests")
+	sleep := flag.Int("sleep", 0, "sleep between consectuvive messages in milliseconds (default none)")
+	timeout := flag.Int("timeout", 100, "timeout on connection in milliseconds")
+	httpPath := flag.String("http-path", "/", "http path for requests")
+	httpMethod := flag.String("http-method", "POST", "http method for requests")
 	flag.Parse()
 
 	if flag.NArg() != 1 {
@@ -236,26 +266,50 @@ func main() {
 		os.Exit(1)
 	}
 
-	if *proto != "tcp" && *proto != "udp" && *proto != "http" {
-		fmt.Println("unsuported protocol", *proto)
-		os.Exit(1)
-	}
-
 	_, ipnet, err := net.ParseCIDR(flag.Arg(0))
 	if err != nil {
 		fmt.Println(err)
 		os.Exit(1)
 	}
-	prefix := ipnet.IP
 	cidr, _ := ipnet.Mask.Size()
+
+	minPort, maxPort, err := ParsePortRange(*port)
+	if err != nil {
+		fmt.Println("can't parse port range:", err)
+		os.Exit(1)
+	}
+
+	var sender PacketSender
+	if *proto == "http" {
+		sender = HttpSender{}
+	} else if *proto == "tcp" {
+		sender = TcpSender{}
+	} else if *proto == "udp" {
+		sender = UdpSender{}
+	} else if *proto == "print" {
+		// for debugging
+		sender = PrintSender{}
+	} else {
+		fmt.Println("unsuported protocol", *proto)
+		os.Exit(1)
+	}
 
 	payload := []byte(strings.Repeat("0123456789", 1+(*size)/10)[:*size])
 
-	addresses := IPRange(prefix, cidr)
+	options := &SprayOptions{
+		Ips:        IPRange(ipnet.IP, cidr),
+		Ports:      PortRange(minPort, maxPort, 1),
+		Payload:    payload,
+		Timeout:    time.Duration(*timeout) * time.Millisecond,
+		Sleep:      time.Duration(*sleep) * time.Millisecond,
+		HttpMethod: *httpMethod,
+		HttpPath:   *httpPath,
+	}
+
 	wg := &sync.WaitGroup{}
 	wg.Add(*spray)
 	for i := 0; i < *spray; i++ {
-		go Spray(addresses, *proto, *port, *path, payload, *num, *count, time.Duration(*timeout)*time.Millisecond, time.Duration(*sleep)*time.Millisecond, wg)
+		go Spray(sender, options, wg)
 	}
 	wg.Wait()
 }

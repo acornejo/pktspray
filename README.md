@@ -1,36 +1,32 @@
 # pktspray
 
-Small utility to spray `tcp` or `udp` packets to a particular ip range.
-Intended as a small utility to aid in network testing and debugging.
-
+Small utility to spray `tcp` packets, `udp` packets or `http` requests across a particular ip range and port range.
+Intended as a small utility to aid in network testing, load testing and debugging.
 
 It supports ipv4 and ipv6 ranges specified in cidr notation as defined
 in RFC 4632 and RFC 4291 (i.e. 192.0.2.0/24 or 2001:db8::/32).
 
-The size of the payload, destination port or number of packets per ip in
-the ip-range can be specified as options. To increase the number of
-packets sent per second you can use multiple connections in parallel.
+The size of the payload, destination port or number of connections in
+parallel can be specified as options.
 
     Usage: pktspray [options] iprange
 
         i.e.: pktspray 192.168.0.1/24
 
-     options:
-      -count int
-            number of messages to send to an address in parallel (default 1)
-      -num int
-            number of messages to send to each address (default unlimited)
-      -path string
-            path to use for http requests (default "/")
-      -port int
-            remote port (default 80)
-      -proto string
+    options:
+    -http-method string
+            http method for requests (default "POST")
+    -http-path string
+            http path for requests (default "/")
+    -port string
+            remote port [PORT] or range [MIN-MAX] (default "80")
+    -proto string
             one of udp, tcp or http (default "tcp")
-      -size int
+    -size int
             size of message payload in bytes (default 100)
-      -sleep int
-            time in milliseconds to wait between consecutive messages (default none)
-      -spray int
-            number of addresses to connect to in parallel (default 1)
-      -timeout int
-            timeout in milliseconds per message (default 100)
+    -sleep int
+            sleep between consectuvive messages in milliseconds (default none)
+    -spray int
+            number of parallel connections (default 1)
+    -timeout int
+            timeout on connection in milliseconds (default 100)
