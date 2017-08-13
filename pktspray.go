@@ -165,7 +165,7 @@ type HttpSender struct {
 type PrintSender struct {
 }
 
-func (s UdpSender) Send(ip net.IP, port int, options *SprayOptions) {
+func (s *UdpSender) Send(ip net.IP, port int, options *SprayOptions) {
 	var err error
 	address := IpPort(ip, port)
 	if address != s.lastAddr {
@@ -181,13 +181,13 @@ func (s UdpSender) Send(ip net.IP, port int, options *SprayOptions) {
 	s.conn.Write(options.Payload)
 }
 
-func (s UdpSender) Close() {
+func (s *UdpSender) Close() {
 	if s.conn != nil {
 		s.conn.Close()
 	}
 }
 
-func (s TcpSender) Send(ip net.IP, port int, options *SprayOptions) {
+func (s *TcpSender) Send(ip net.IP, port int, options *SprayOptions) {
 	var err error
 	address := IpPort(ip, port)
 	if address != s.lastAddr {
@@ -205,13 +205,13 @@ func (s TcpSender) Send(ip net.IP, port int, options *SprayOptions) {
 	s.conn.Write(options.Payload)
 }
 
-func (s TcpSender) Close() {
+func (s *TcpSender) Close() {
 	if s.conn != nil {
 		s.conn.Close()
 	}
 }
 
-func (s HttpSender) Send(ip net.IP, port int, options *SprayOptions) {
+func (s *HttpSender) Send(ip net.IP, port int, options *SprayOptions) {
 	// TODO: Investigate keep alives
 	// client.Transport = &http.Transport{DisableKeepAlives: true}
 	if s.client == nil {
@@ -245,13 +245,13 @@ func (s HttpSender) Send(ip net.IP, port int, options *SprayOptions) {
 	}
 }
 
-func (s HttpSender) Close() {}
+func (s *HttpSender) Close() {}
 
-func (s PrintSender) Send(ip net.IP, port int, options *SprayOptions) {
+func (s *PrintSender) Send(ip net.IP, port int, options *SprayOptions) {
 	fmt.Println("spraying", IpPort(ip, port))
 }
 
-func (s PrintSender) Close() {
+func (s *PrintSender) Close() {
 	fmt.Println("closing")
 }
 
@@ -301,14 +301,14 @@ func main() {
 
 	var sender PacketSender
 	if *proto == "http" {
-		sender = HttpSender{}
+		sender = &HttpSender{}
 	} else if *proto == "tcp" {
-		sender = TcpSender{}
+		sender = &TcpSender{}
 	} else if *proto == "udp" {
-		sender = UdpSender{}
+		sender = &UdpSender{}
 	} else if *proto == "print" {
 		// for debugging
-		sender = PrintSender{}
+		sender = &PrintSender{}
 	} else {
 		fmt.Println("unsuported protocol", *proto)
 		os.Exit(1)
